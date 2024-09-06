@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"log"
 	"net"
 	"os"
@@ -18,12 +19,37 @@ func main() {
 		log.Println("Error accepting connection: ", err.Error())
 		os.Exit(1)
 	}
+	defer conn.Close()
 
-	toWrite := []byte("HTTP/1.1 200 OK\r\n\r\n")
-	_, err = conn.Write(toWrite)
+	var statCode []byte
+
+	buff := make([]byte, 1024)
+	_, err = conn.Read(buff)
 	if err != nil {
-		log.Println("Error accepting connection: ", err.Error())
+		log.Println("Error reading connection: ", err.Error())
 		os.Exit(1)
 	}
-	defer conn.Close()
+
+	var pathName []byte
+	splitBuff := bytes.Split(buff, []byte(" "))
+	if len(splitBuff) > 1 {
+		pathName = splitBuff[1]
+	}
+
+	if len(pathName) == 1 {
+		statCode = []byte("200 OK")
+	} else {
+		statCode = []byte("404 Not Found")
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("HTTP/1.1 ")
+	buf.Write(statCode)
+	buf.WriteString("\r\n\r\n")
+	toWrite := buf.Bytes()
+	_, err = conn.Write(toWrite)
+	if err != nil {
+		log.Println("Error writing to connection: ", err.Error())
+		os.Exit(1)
+	}
 }
