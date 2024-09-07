@@ -9,8 +9,16 @@ import (
 	"sync"
 	"regexp"
 	"runtime"
-	"bytes"
+	"io"
 )
+
+type Headers struct {
+	Host string
+	UserAgent string
+	Accept string
+	ContentLength string
+	ContentType string
+}
 
 const (
 	port         = ":4221"
@@ -53,58 +61,114 @@ func main() {
 }
 
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
+    defer conn.Close()
 
-	reader := bufio.NewReader(conn)
-	requestLine, isPrefix, err := reader.ReadLine()
-	if err != nil {
-		log.Printf("Error reading connection: %v", err)
-		return
-	}
+    reader := bufio.NewReader(conn)
+    requestLine, err := reader.ReadString('\n')
+    if err != nil {
+        log.Printf("Error reading connection: %v", err)
+        return
+    }
 
-	if isPrefix {
-		log.Printf("Request line too long")
-		return
-	}
+    path := getPath(requestLine)
+    headers, err := getHeaders(reader)
+    if err != nil {
+        log.Printf("Error reading headers: %v", err)
+        return
+    }
 
-	path := getPath(requestLine)
-	statusCode := getStatusCode(path)
-	restResponse := getRestResponse(path)
+    statusCode := getStatusCode(path)
+    restResponse := getRestResponse(path, headers)
 
-	response := fmt.Sprintf("HTTP/1.1 %s\r\n%s", statusCode, restResponse)
-	if _, err := conn.Write([]byte(response)); err != nil {
-		log.Printf("Error writing to connection: %v", err)
-	}
+    response := fmt.Sprintf("HTTP/1.1 %s\r\n%s", statusCode, restResponse)
+    if _, err := conn.Write([]byte(response)); err != nil {
+        log.Printf("Error writing to connection: %v", err)
+    }
 }
 
-func getPath(requestLine []byte) string {
-	parts := bytes.Split(requestLine, []byte(" "))
-	if len(parts) < 2 {
-		return ""
-	}
-	return string(parts[1])
+func getPath(requestLine string) string {
+    parts := strings.Split(strings.TrimSpace(requestLine), " ")
+    if len(parts) < 2 {
+        return ""
+    }
+    return parts[1]
+}
+
+func getHeaders(reader *bufio.Reader) (Headers, error) {
+    headers := Headers{}
+    for {
+        line, err := reader.ReadString('\n')
+        if err != nil {
+            if err == io.EOF {
+                break
+            }
+            return headers, fmt.Errorf("error reading header line: %w", err)
+        }
+
+        // Remove trailing \r\n
+        line = strings.TrimSpace(line)
+
+        // Empty line means end of headers
+        if line == "" {
+            break
+        }
+
+        // Split the header line
+        parts := strings.SplitN(line, ":", 2)
+        if len(parts) == 2 {
+            headerName := strings.TrimSpace(parts[0])
+            headerValue := strings.TrimSpace(parts[1])
+
+            switch strings.ToLower(headerName) {
+            case "host":
+                headers.Host = headerValue
+            case "user-agent":
+                headers.UserAgent = headerValue
+            case "accept":
+                headers.Accept = headerValue
+            case "content-length":
+                headers.ContentLength = headerValue
+            case "content-type":
+                headers.ContentType = headerValue
+            }
+        }
+    }
+
+    return headers, nil
 }
 
 func getStatusCode(path string) string {
-	if path == "/" || strings.HasPrefix(path, "/echo") {
-		return "200 OK"
-	}
-	return "404 Not Found"
-}
+    endpoints := []string{"/", "/echo", "/user-agent"}
 
-func getRestResponse(path string) string {
-    re := regexp.MustCompile(`^/echo(/(?P<toEcho>.*))?$`)
-    match := re.FindStringSubmatch(path)
-
-    if match != nil {
-        toEchoIndex := re.SubexpIndex("toEcho")
-        toEcho := match[toEchoIndex]
-
-        if toEcho == "" {
-            return "Content-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
+    // Check if the path exactly matches any of the endpoints
+    for _, endpoint := range endpoints {
+        if path == endpoint || strings.HasPrefix(path, endpoint+"/") {
+            return "200 OK"
         }
-        return fmt.Sprintf("Content-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
     }
 
+    // If no match is found
+    return "404 Not Found"
+}
+
+func getRestResponse(path string, headers Headers) string {
+    switch {
+    case path == "/":
+        return "\r\n"
+    case strings.HasPrefix(path, "/echo"):
+        re := regexp.MustCompile(`^/echo(/(?P<toEcho>.*))?$`)
+        match := re.FindStringSubmatch(path)
+        if match != nil {
+            toEchoIndex := re.SubexpIndex("toEcho")
+            toEcho := match[toEchoIndex]
+            if toEcho == "" {
+                return "Content-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
+            }
+            return fmt.Sprintf("Content-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
+        }
+    case path == "/user-agent":
+        return fmt.Sprintf("Content-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(headers.UserAgent), headers.UserAgent)
+    }
     return "\r\n"
 }
+
