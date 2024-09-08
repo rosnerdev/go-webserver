@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"log"
@@ -204,6 +206,12 @@ func handleEcho(path string, headers Headers) (string, string) {
 		}
 
 		if slices.Contains(encodings, "gzip") {
+			var buffer bytes.Buffer
+			w := gzip.NewWriter(&buffer)
+			w.Write([]byte(toEcho))
+			w.Close()
+			toEcho = buffer.String()
+
 			return "200 OK", fmt.Sprintf("Content-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
 		}
 
