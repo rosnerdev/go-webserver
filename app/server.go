@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -197,7 +198,12 @@ func handleEcho(path string, headers Headers) (string, string) {
 			return "200 OK", "Content-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
 		}
 
-		if headers.AcceptEncoding == "gzip" {
+		encodings := strings.Split(headers.AcceptEncoding, ", ")
+		for i, e := range encodings {
+			encodings[i] = strings.TrimSpace(e)
+		}
+
+		if slices.Contains(encodings, "gzip") {
 			return "200 OK", fmt.Sprintf("Content-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
 		}
 
