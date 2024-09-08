@@ -9,17 +9,18 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
-	"strconv"
 )
 
 type Headers struct {
-	Host          string
-	UserAgent     string
-	Accept        string
-	ContentLength string
-	ContentType   string
+	Host           string
+	UserAgent      string
+	Accept         string
+	ContentLength  string
+	ContentType    string
+	AcceptEncoding string
 }
 
 const (
@@ -61,49 +62,49 @@ func main() {
 }
 
 func handleConnection(conn net.Conn) {
-    defer conn.Close()
+	defer conn.Close()
 
-    reader := bufio.NewReader(conn)
-    requestLine, _, err := reader.ReadLine()
-    if err != nil {
-        log.Printf("Error reading connection: %v", err)
-        return
-    }
+	reader := bufio.NewReader(conn)
+	requestLine, _, err := reader.ReadLine()
+	if err != nil {
+		log.Printf("Error reading connection: %v", err)
+		return
+	}
 
-    method := getMethod(string(requestLine))
-    path := getPath(string(requestLine))
-    headers, err := getHeaders(reader)
-    if err != nil {
-        log.Printf("Error reading headers: %v", err)
-        return
-    }
+	method := getMethod(string(requestLine))
+	path := getPath(string(requestLine))
+	headers, err := getHeaders(reader)
+	if err != nil {
+		log.Printf("Error reading headers: %v", err)
+		return
+	}
 
-    var body []byte
-    if method == "POST" {
-        contentLength, _ := strconv.Atoi(headers.ContentLength)
-        body = make([]byte, contentLength)
-        _, err = io.ReadFull(reader, body)
-        if err != nil {
-            log.Printf("Error reading request body: %v", err)
-            return
-        }
-    }
+	var body []byte
+	if method == "POST" {
+		contentLength, _ := strconv.Atoi(headers.ContentLength)
+		body = make([]byte, contentLength)
+		_, err = io.ReadFull(reader, body)
+		if err != nil {
+			log.Printf("Error reading request body: %v", err)
+			return
+		}
+	}
 
-    var statusCode, restResponse string
-    switch method {
-    case "POST":
-        statusCode, restResponse = postResponse(path, body, headers)
-    case "GET":
-        statusCode, restResponse = getResponse(path, "", headers)
-    default:
-        statusCode, restResponse = "405 Method Not Allowed", "\r\n"
-    }
+	var statusCode, restResponse string
+	switch method {
+	case "POST":
+		statusCode, restResponse = postResponse(path, body)
+	case "GET":
+		statusCode, restResponse = getResponse(path, "", headers)
+	default:
+		statusCode, restResponse = "405 Method Not Allowed", "\r\n"
+	}
 
-    response := fmt.Sprintf("HTTP/1.1 %s\r\n%s", statusCode, restResponse)
-    _, err = conn.Write([]byte(response))
-    if err != nil {
-        log.Printf("Error writing response: %v", err)
-    }
+	response := fmt.Sprintf("HTTP/1.1 %s\r\n%s", statusCode, restResponse)
+	_, err = conn.Write([]byte(response))
+	if err != nil {
+		log.Printf("Error writing response: %v", err)
+	}
 }
 
 func getPath(requestLine string) string {
@@ -155,6 +156,8 @@ func getHeaders(reader *bufio.Reader) (Headers, error) {
 				headers.ContentLength = headerValue
 			case "content-type":
 				headers.ContentType = headerValue
+			case "accept-encoding":
+				headers.AcceptEncoding = headerValue
 			}
 		}
 	}
@@ -162,12 +165,12 @@ func getHeaders(reader *bufio.Reader) (Headers, error) {
 	return headers, nil
 }
 
-func postResponse(path string, body []byte, headers Headers) (string, string) {
-    switch {
-    case strings.HasPrefix(path, "/files"):
-        return handleFiles(path, "POST", body)
-    }
-    return "404 Not Found", "\r\n"
+func postResponse(path string, body []byte) (string, string) {
+	switch {
+	case strings.HasPrefix(path, "/files"):
+		return handleFiles(path, "POST", body)
+	}
+	return "404 Not Found", "\r\n"
 }
 
 func getResponse(path, lastLine string, headers Headers) (string, string) {
@@ -175,7 +178,7 @@ func getResponse(path, lastLine string, headers Headers) (string, string) {
 	case path == "/":
 		return "200 OK", "\r\n"
 	case strings.HasPrefix(path, "/echo"):
-		return handleEcho(path)
+		return handleEcho(path, headers)
 	case path == "/user-agent":
 		return handleUserAgent(headers)
 	case strings.HasPrefix(path, "/files"):
@@ -184,7 +187,7 @@ func getResponse(path, lastLine string, headers Headers) (string, string) {
 	return "404 Not Found", "\r\n"
 }
 
-func handleEcho(path string) (string, string) {
+func handleEcho(path string, headers Headers) (string, string) {
 	re := regexp.MustCompile(`^/echo(/(?P<toEcho>.*))?$`)
 	match := re.FindStringSubmatch(path)
 	if match != nil {
@@ -193,6 +196,11 @@ func handleEcho(path string) (string, string) {
 		if toEcho == "" {
 			return "200 OK", "Content-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
 		}
+
+		if headers.AcceptEncoding == "gzip" {
+			return "200 OK", fmt.Sprintf("Content-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
+		}
+
 		return "200 OK", fmt.Sprintf("Content-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(toEcho), toEcho)
 	}
 	return "404 Not Found", "\r\n"
@@ -203,43 +211,43 @@ func handleUserAgent(headers Headers) (string, string) {
 }
 
 func handleFiles(path, method string, body []byte) (string, string) {
-    re := regexp.MustCompile(`^/files(/(?P<fileName>.*))?$`)
-    match := re.FindStringSubmatch(path)
-    if match != nil {
-        fileNameIndex := re.SubexpIndex("fileName")
-        fileName := match[fileNameIndex]
-        switch method {
-        case "GET":
-            if fileName == "" {
+	re := regexp.MustCompile(`^/files(/(?P<fileName>.*))?$`)
+	match := re.FindStringSubmatch(path)
+	if match != nil {
+		fileNameIndex := re.SubexpIndex("fileName")
+		fileName := match[fileNameIndex]
+		switch method {
+		case "GET":
+			if fileName == "" {
 				return "200 OK", "Content-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
 			}
-	
+
 			file, err := os.Open("/tmp/data/codecrafters.io/http-server-tester/" + fileName)
 			if err != nil {
 				log.Println(err)
 				return "404 Not Found", "\r\n"
 			}
 			defer file.Close()
-	
+
 			var fileContent string
 			scanner := bufio.NewScanner(file)
 			for scanner.Scan() {
 				fileContent += scanner.Text()
 			}
-	
+
 			return "200 OK", fmt.Sprintf("Content-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(fileContent), fileContent)
-        case "POST":
-            if fileName == "" {
-                return "400 Bad Request", "\r\n"
-            }
-            filePath := "/tmp/data/codecrafters.io/http-server-tester/" + fileName
-            if err := os.WriteFile(filePath, body, 0644); err == nil {
-                return "201 Created", "\r\n"
-            } else {
-                log.Printf("Error writing file: %v", err)
-                return "500 Internal Server Error", "\r\n"
-            }
-        }
-    }
-    return "404 Not Found", "\r\n"
+		case "POST":
+			if fileName == "" {
+				return "400 Bad Request", "\r\n"
+			}
+			filePath := "/tmp/data/codecrafters.io/http-server-tester/" + fileName
+			if err := os.WriteFile(filePath, body, 0644); err == nil {
+				return "201 Created", "\r\n"
+			} else {
+				log.Printf("Error writing file: %v", err)
+				return "500 Internal Server Error", "\r\n"
+			}
+		}
+	}
+	return "404 Not Found", "\r\n"
 }
