@@ -3,22 +3,23 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"os"
 	"regexp"
 	"runtime"
 	"strings"
 	"sync"
-	"io"
-	"os"
+	"strconv"
 )
 
 type Headers struct {
-	Host           string
-	UserAgent      string
-	Accept         string
-	ContentLength  string
-	ContentType    string
+	Host          string
+	UserAgent     string
+	Accept        string
+	ContentLength string
+	ContentType   string
 }
 
 const (
@@ -60,28 +61,49 @@ func main() {
 }
 
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
+    defer conn.Close()
 
-	reader := bufio.NewReader(conn)
-	requestLine, err := reader.ReadString('\n')
-	if err != nil {
-		log.Printf("Error reading connection: %v", err)
-		return
-	}
+    reader := bufio.NewReader(conn)
+    requestLine, _, err := reader.ReadLine()
+    if err != nil {
+        log.Printf("Error reading connection: %v", err)
+        return
+    }
 
-	path := getPath(requestLine)
-	headers, err := getHeaders(reader)
-	if err != nil {
-		log.Printf("Error reading headers: %v", err)
-		return
-	}
+    method := getMethod(string(requestLine))
+    path := getPath(string(requestLine))
+    headers, err := getHeaders(reader)
+    if err != nil {
+        log.Printf("Error reading headers: %v", err)
+        return
+    }
 
-	statusCode, restResponse := getResponse(path, headers)
+    var body []byte
+    if method == "POST" {
+        contentLength, _ := strconv.Atoi(headers.ContentLength)
+        body = make([]byte, contentLength)
+        _, err = io.ReadFull(reader, body)
+        if err != nil {
+            log.Printf("Error reading request body: %v", err)
+            return
+        }
+    }
 
-	response := fmt.Sprintf("HTTP/1.1 %s\r\n%s", statusCode, restResponse)
-	if _, err := conn.Write([]byte(response)); err != nil {
-		log.Printf("Error writing to connection: %v", err)
-	}
+    var statusCode, restResponse string
+    switch method {
+    case "POST":
+        statusCode, restResponse = postResponse(path, body, headers)
+    case "GET":
+        statusCode, restResponse = getResponse(path, "", headers)
+    default:
+        statusCode, restResponse = "405 Method Not Allowed", "\r\n"
+    }
+
+    response := fmt.Sprintf("HTTP/1.1 %s\r\n%s", statusCode, restResponse)
+    _, err = conn.Write([]byte(response))
+    if err != nil {
+        log.Printf("Error writing response: %v", err)
+    }
 }
 
 func getPath(requestLine string) string {
@@ -90,6 +112,14 @@ func getPath(requestLine string) string {
 		return ""
 	}
 	return parts[1]
+}
+
+func getMethod(requestLine string) string {
+	parts := strings.Split(strings.TrimSpace(requestLine), " ")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
 }
 
 func getHeaders(reader *bufio.Reader) (Headers, error) {
@@ -132,7 +162,15 @@ func getHeaders(reader *bufio.Reader) (Headers, error) {
 	return headers, nil
 }
 
-func getResponse(path string, headers Headers) (string, string) {
+func postResponse(path string, body []byte, headers Headers) (string, string) {
+    switch {
+    case strings.HasPrefix(path, "/files"):
+        return handleFiles(path, "POST", body)
+    }
+    return "404 Not Found", "\r\n"
+}
+
+func getResponse(path, lastLine string, headers Headers) (string, string) {
 	switch {
 	case path == "/":
 		return "200 OK", "\r\n"
@@ -141,7 +179,7 @@ func getResponse(path string, headers Headers) (string, string) {
 	case path == "/user-agent":
 		return handleUserAgent(headers)
 	case strings.HasPrefix(path, "/files"):
-		return handleFiles(path)
+		return handleFiles(path, "GET", []byte(lastLine))
 	}
 	return "404 Not Found", "\r\n"
 }
@@ -164,30 +202,44 @@ func handleUserAgent(headers Headers) (string, string) {
 	return "200 OK", fmt.Sprintf("Content-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(headers.UserAgent), headers.UserAgent)
 }
 
-func handleFiles(path string) (string, string) {
-	re := regexp.MustCompile(`^/files(/(?P<fileName>.*))?$`)
-	match := re.FindStringSubmatch(path)
-	if match != nil {
-		fileNameIndex := re.SubexpIndex("fileName")
-		fileName := match[fileNameIndex]
-		if fileName == "" {
-			return "200 OK", "Content-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
-		}
-
-		file, err := os.Open("/tmp/data/codecrafters.io/http-server-tester/" + fileName)
-		if err != nil {
-			log.Println(err)
-			return "404 Not Found", "\r\n"
-		}
-		defer file.Close()
-
-		var fileContent string
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			fileContent += scanner.Text()
-		}
-
-		return fmt.Sprintf("200 OK"), fmt.Sprintf("Content-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(fileContent), fileContent)
-	}
-	return "404 Not Found", "\r\n"
+func handleFiles(path, method string, body []byte) (string, string) {
+    re := regexp.MustCompile(`^/files(/(?P<fileName>.*))?$`)
+    match := re.FindStringSubmatch(path)
+    if match != nil {
+        fileNameIndex := re.SubexpIndex("fileName")
+        fileName := match[fileNameIndex]
+        switch method {
+        case "GET":
+            if fileName == "" {
+				return "200 OK", "Content-Type: text/plain\r\nContent-Length: 0\r\n\r\n"
+			}
+	
+			file, err := os.Open("/tmp/data/codecrafters.io/http-server-tester/" + fileName)
+			if err != nil {
+				log.Println(err)
+				return "404 Not Found", "\r\n"
+			}
+			defer file.Close()
+	
+			var fileContent string
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				fileContent += scanner.Text()
+			}
+	
+			return "200 OK", fmt.Sprintf("Content-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(fileContent), fileContent)
+        case "POST":
+            if fileName == "" {
+                return "400 Bad Request", "\r\n"
+            }
+            filePath := "/tmp/data/codecrafters.io/http-server-tester/" + fileName
+            if err := os.WriteFile(filePath, body, 0644); err == nil {
+                return "201 Created", "\r\n"
+            } else {
+                log.Printf("Error writing file: %v", err)
+                return "500 Internal Server Error", "\r\n"
+            }
+        }
+    }
+    return "404 Not Found", "\r\n"
 }
